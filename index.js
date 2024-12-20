@@ -6,16 +6,16 @@ import fs from 'fs';
 puppeteer.use(StealthPlugin());
 
 
-async function getDownloadLink(url) {
-    const browser = await puppeteer.launch({
-        headless: false,
-        args: [
-            '--no-sandbox',
-            '--disable-setuid-sandbox',
-            '--disable-extensions', // Disable extensions
-            '--disable-popup-blocking' // Disable popup blocking
-        ],
-    });
+async function getDownloadLink(url,browser) {
+    // const browser = await puppeteer.launch({
+    //     headless: false,
+    //     args: [
+    //         '--no-sandbox',
+    //         '--disable-setuid-sandbox',
+    //         '--disable-extensions', // Disable extensions
+    //         '--disable-popup-blocking' // Disable popup blocking
+    //     ],
+    // });
 
 
 
@@ -187,102 +187,133 @@ async function getDownloadLink(url) {
     return final_data;
 }
 
-getDownloadLink('https://getintopc.com/softwares/backup-tool/ashampoo-backup-pro-2025-free-download/')
-    .then(data => {
-        console.log('\nCompleted scraping. Found links:');
-        console.log(data);
-    })
-    .catch(error => {
-        console.error('Script failed:', error);
-    });
-
-// async function getAllDownloadLinks() {
-// const browser = await puppeteer.launch({
-//     headless: false,
-//     args: [
-//         '--no-sandbox',
-//         '--disable-setuid-sandbox',
-//         '--disable-extensions', // Disable extensions
-//         '--disable-popup-blocking' // Disable popup blocking
-//     ],
-//     defaultViewport: null,
-//     executablePath: executablePath(),
-// });
-
-//     const downloadLinks = [];
-
-//     try {
-//         const page = await browser.newPage();
-//         const allLinks = [];
-//         // Go to main page
-//         for (let index = 0; index < 50; index++) {
-//             try {
-//                 await page.goto(`https://getintopc.com/page/${index}/?0`, { 
-//                     waitUntil: 'networkidle2', 
-//                     timeout: 60000 
-//                 });
-
-//                 // Get all article links
-//                 await page.waitForSelector('h2.title');
-//                 const links = await page.$$eval('h2.title a', 
-//                     elements => elements.map(el => ({
-//                         title: el.textContent.trim(),
-//                         url: el.href
-//                     }))
-//                 );
-//                 allLinks.push(...links); // Use spread operator to flatten the array
-//             } catch (error) {
-//                 console.error(`Error on page ${index}:`, error);
-//             }
-//         }
-//         console.log(allLinks)
-
-//         // console.log(`Found ${links.length} articles to process`);
-        
-//         // Process first 5 links
-//         // const linksToProcess = links.slice(0, 5);
-
-//         // // Process each link
-//         // for (const link of linksToProcess) {
-//         //     console.log(`\nProcessing: ${link.title}`);
-//         //     const downloadUrl = await getDownloadLink(link.url);
-            
-//         //     if (downloadUrl) {
-//         //         downloadLinks.push({
-//         //             title: link.title,
-//         //             downloadUrl: downloadUrl
-//         //         });
-//         //         console.log(`✅ Successfully got download URL for: ${link.title}`);
-//         //     } else {
-//         //         console.log(`❌ Failed to get download URL for: ${link.title}`);
-//         //     }
-
-//         //     // Wait between articles
-//         //     await new Promise(resolve => setTimeout(resolve, 5000));
-//         // }
-
-//         // Save to file
-//         fs.writeFileSync('download_links.json', JSON.stringify(allLinks, null, 2));
-//         console.log('\nSaved all download links to download_links.json');
-
-//     } catch (error) {
-//         console.error('Error during scraping:', error);
-//     } finally {
-//         await browser.close();
-//     }
-
-//     return downloadLinks;
-// }
-
-// Run the scraper
-// const downloadLinks = [];
-// getAllDownloadLinks()
-//     .then(links => {
+// getDownloadLink('https://getintopc.com/softwares/backup-tool/ashampoo-backup-pro-2025-free-download/')
+//     .then(data => {
 //         console.log('\nCompleted scraping. Found links:');
-//         links.forEach(link => {
-//         downloadLinks.push({title: link.title, downloadUrl: link.downloadUrl});
-//         });
+//         console.log(data);
 //     })
 //     .catch(error => {
 //         console.error('Script failed:', error);
 //     });
+
+async function getAllDownloadLinks() {
+const browser = await puppeteer.launch({
+    headless: false,
+    args: [
+        '--no-sandbox',
+        '--disable-setuid-sandbox',
+        '--disable-extensions', // Disable extensions
+        '--disable-popup-blocking' // Disable popup blocking
+    ],
+    // defaultViewport: null,
+    // executablePath: executablePath(),
+});
+
+    let allLinks = [];
+    const dataWithDownloadLink = null;
+    try {
+        const page = await browser.newPage();
+        const allLinks = [];
+        // Go to main page
+        for (let index = 0; index < 50; index++) {
+            try {
+                await page.goto(`https://getintopc.com/page/${index}/?0`, { 
+                    waitUntil: 'networkidle2', 
+                    timeout: 60000 
+                });
+
+                // Get all article links
+                await page.waitForSelector('h2.title');
+                const links = await page.$$eval('h2.title a', 
+                    elements => elements.map(el => ({
+                        title: el.textContent.trim(),
+                        url: el.href
+                    }))
+                );
+
+                const categories = await page.$$eval('.post-info a', 
+                    elements => elements.map(el => el.textContent.trim())
+                );
+                links.categories = categories;
+                allLinks.push(...links); // Use spread operator to flatten the array
+
+                const linksToProcess = allLinks.slice(0, 2);
+
+                // Process each link
+                linksToProcess.forEach(async (link) => {
+                    console.log(`\nProcessing: ${link.title}`);
+                    const readyData = await getDownloadLink(link.url, browser);
+                    
+                    if (readyData) {
+                        dataWithDownloadLink.push({
+                            title: link.title,
+                            url: link.url,
+                            categories: link.categories,
+                            data: readyData
+                        });
+                        console.log(`✅ Successfully got data URL for: ${link.title}`);
+                    } else {
+                        console.log(`❌ Failed to get data URL for: ${link.title}`);
+                    }
+        
+                    // Wait between articles
+                    await new Promise(resolve => setTimeout(resolve, 2000));
+                })
+            } catch (error) {
+                console.error(`Error on page ${index}:`, error);
+            }
+        }
+        console.log(allLinks);
+        console.log(dataWithDownloadLink);
+
+        return dataWithDownloadLink;
+
+        // console.log(`Found ${links.length} articles to process`);
+        
+        // Process first 5 links
+        // const linksToProcess = links.slice(0, 5);
+
+        // // Process each link
+        // for (const link of linksToProcess) {
+        //     console.log(`\nProcessing: ${link.title}`);
+        //     const downloadUrl = await getDownloadLink(link.url);
+            
+        //     if (downloadUrl) {
+        //         downloadLinks.push({
+        //             title: link.title,
+        //             downloadUrl: downloadUrl
+        //         });
+        //         console.log(`✅ Successfully got download URL for: ${link.title}`);
+        //     } else {
+        //         console.log(`❌ Failed to get download URL for: ${link.title}`);
+        //     }
+
+        //     // Wait between articles
+        //     await new Promise(resolve => setTimeout(resolve, 5000));
+        // }
+
+        // Save to file
+        // fs.writeFileSync('download_links.json', JSON.stringify(allLinks, null, 2));
+        // console.log('\nSaved all download links to download_links.json');
+
+    } catch (error) {
+        console.error('Error during scraping:', error);
+    } finally {
+        await browser.close();
+    }
+
+    return allLinks;
+}
+
+// Run the scraper
+const globalData = [];
+getAllDownloadLinks()
+    .then(links => {
+        console.log('\nCompleted scraping. Found data:');
+        links.forEach(link => {
+            globalData.push(link);
+        });
+    })
+    .catch(error => {
+        console.error('Script failed:', error);
+    });
