@@ -1,88 +1,65 @@
 import puppeteer from "puppeteer-extra";
 import StealthPlugin from "puppeteer-extra-plugin-stealth";
-import { executablePath } from 'puppeteer';
 import fs from 'fs';
 
+// Initialize puppeteer with stealth plugin
 puppeteer.use(StealthPlugin());
 
+async function initBrowser() {
+    return await puppeteer.launch({
+        headless: true,
+        args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-extensions', '--disable-popup-blocking']
+    });
+}
 
-async function getDownloadLink(url,browser) {
-    // const browser = await puppeteer.launch({
-    //     headless: false,
-    //     args: [
-    //         '--no-sandbox',
-    //         '--disable-setuid-sandbox',
-    //         '--disable-extensions', // Disable extensions
-    //         '--disable-popup-blocking' // Disable popup blocking
-    //     ],
-    // });
-
-
-
-    let downloadUrl = null;
-    let final_data = null;
+async function scrapeArticleData(browser, url) {
+    console.log(`📄 Scraping article data from: ${url}`);
+    
+    const page = await browser.newPage();
     try {
-        const page = await browser.newPage();
-        // Go to article page
-        await page.goto(url, { waitUntil: 'networkidle2'});
-
+        await page.goto(url, { waitUntil: 'networkidle2', timeout: 60000 });
         await page.waitForSelector('div.post-content');
 
         const data = await page.evaluate(() => {
             const postContent = document.querySelector(".post-content.clear-block");
             const result = {
                 overview: "",
-                image:"",
-                image_supp:"",
-                download_url:"",
+                image: "",
                 details: {
-                    standardized: {}, // Standardized keys
-                    other_details: {} // Fallback for unrecognized keys
+                    standardized: {},
+                    other_details: {}
                 }
             };
-    
-            // Key mapping: Customize as per your requirements
+
             const keyMapping = {
                 "software full name": "software_name",
                 "setup file name": "file_name",
                 "full setup size": "file_size",
                 "setup type": "installer_type",
                 "compatibility architecture": "architecture",
-                "Compatibility Mechanical": "architecture",
+                "compatibility mechanical": "architecture",
                 "latest version release added on": "release_date",
                 "developers": "developer"
             };
-    
+
             if (postContent) {
                 const secondP = postContent.querySelectorAll("p")[1];
-                if (secondP) {
-                    result.overview = secondP.textContent.trim();
-                }
+                result.overview = secondP ? secondP.textContent.trim() : "";
 
-                // get the image href from the third <p> there is <img> inside
                 const thirdP = postContent.querySelectorAll("p")[2];
-                if (thirdP) {
-                    const image = thirdP.querySelector("img");
-                    if (image) {
-                        result.image = image.src;
-                    }
-                }
+                const image = thirdP?.querySelector("img");
+                result.image = image ? image.src : "";
 
-    
                 const uls = postContent.querySelectorAll("ul");
                 if (uls.length > 1) {
-                    const secondUl = uls[1];
-                    const lis = secondUl.querySelectorAll("li");
-    
-                    lis.forEach(li => {
-                        const text = li.textContent.trim();
-                        const parts = text.split(":");
-                        if (parts.length > 1) {
-                            const rawKey = parts[0].trim().toLowerCase();
-                            const value = parts.slice(1).join(":").trim();
-    
-                            // Match raw key to standardized key or fallback
-                            const standardizedKey = keyMapping[rawKey] || null;
+                    const detailsList = uls[1].querySelectorAll("li");
+                    detailsList.forEach(li => {
+                        const [key, ...valueParts] = li.textContent.trim().split(":");
+                        if (valueParts.length) {
+                            const rawKey = key.trim().toLowerCase();
+                            const value = valueParts.join(":").trim();
+                            
+                            const standardizedKey = keyMapping[rawKey];
                             if (standardizedKey) {
                                 result.details.standardized[standardizedKey] = value;
                             } else {
@@ -92,228 +69,201 @@ async function getDownloadLink(url,browser) {
                     });
                 }
             }
-
             return result;
         });
-        const searchQuery = data.details.standardized.software_name.toLowerCase().split(' ').slice(0, 2).join(' ')+ " programme Icon 16:3";        
-        const googleSearchUrl = `https://www.google.com/search?tbm=isch&q=${encodeURIComponent(searchQuery)}`;
 
-        const searchPage = await browser.newPage();
+        return { page, data };
+    } catch (error) {
+        console.error(`❌ Error scraping article data: ${error.message}`);
+        await page.close();
+        return { page: null, data: null };
+    }
+}
 
-        try {
-            // Extract the product name from your data object
-            const productName = data.details.standardized.software_name;
-
-            console.log("Product Name:", productName);
-
-            // Navigate to Google Images search page
-            console.log("Navigating to Google Images search page...");
-            await searchPage.goto(googleSearchUrl, { waitUntil: "domcontentloaded", timeout: 60000 });
-            console.log("Google Images search page loaded.");
-
-            // Wait for the images to load
-            console.log("Waiting for images to load...");
-            await searchPage.waitForSelector("img", { timeout: 30000 });
-            console.log("Images loaded.");
-
-            // Get the first image link that contains the product name in the alt attribute
-            console.log("Getting the first relevant image link...");
-            const firstImageLink = await searchPage.evaluate((productName) => {
-                const images = Array.from(document.querySelectorAll("img"));
-                
-                // Normalize product name for comparison
-                const normalizedProductName = productName.toLowerCase().split(' ')[0];   
-                // Find image where alt attribute contains product name
-                const relevantImage = images.find(img => {
-                    const altText = img.alt ? img.alt.toLowerCase() : "";
-                    return altText.includes(normalizedProductName) && img.src;
-                });
-                
-                // If no relevant image, fallback to the first valid HTTP image
-                const fallbackImage = images.find(img => img.src);
-                
-                return relevantImage ? relevantImage.src : (fallbackImage ? fallbackImage.src : null);
-            }, productName);
-            //
-            data.image_supp = firstImageLink;
-            searchPage.close();
-        } catch (error) {
-            console.error("Error fetching program icon:", error);
-            await browser.close();
-        }
+async function getSupplementaryImage(browser, softwareName) {
+    console.log(`🔍 Searching for supplementary image for: ${softwareName}`);
     
-        console.log(data);
+    const searchPage = await browser.newPage();
+    try {
+        const searchQuery = `${softwareName.toLowerCase().split(' ').slice(0, 2).join(' ')} programme Icon 16:3`;
+        await searchPage.goto(
+            `https://www.google.com/search?tbm=isch&q=${encodeURIComponent(searchQuery)}`,
+            { waitUntil: "domcontentloaded", timeout: 60000 }
+        );
 
+        await searchPage.waitForSelector("img");
+        
+        const imageUrl = await searchPage.evaluate((name) => {
+            const normalizedName = name.toLowerCase().split(' ')[0];
+            const images = Array.from(document.querySelectorAll("img"));
+            
+            const relevantImage = images.find(img => {
+                const altText = img.alt?.toLowerCase() || "";
+                return altText.includes(normalizedName) && img.src;
+            });
+            
+            return relevantImage?.src || images[0]?.src || null;
+        }, softwareName);
 
-        // **************************************
-        // get the download link block
-        // **************************************
+        return imageUrl;
+    } catch (error) {
+        console.error(`❌ Error getting supplementary image: ${error.message}`);
+        return null;
+    } finally {
+        await searchPage.close();
+    }
+}
 
+async function getDownloadLink(page) {
+    console.log('🔗 Getting download link...');
+    
+    try {
         await page.waitForSelector('button.btn');
         await page.click('button.btn');
-        //Monitor for new pages (PHP page)
-        browser.on('targetcreated', async (target) => {
-            if (target.type() === 'page') {
-                const newPage = await target.page();
-                if (newPage) {
-                    // Monitor responses on the PHP page
-                    newPage.on('response', async (response) => {
-                        const responseUrl = response.url();
-                        if (responseUrl.includes('expires')) {
-                            console.log('✅ Found final download URL:', responseUrl);
-                            downloadUrl = responseUrl;
-                            browser.close();
-                        }
-                    });
+
+        return new Promise((resolve) => {
+            const timeout = setTimeout(() => resolve(null), 60000);
+            let downloadUrl = null;
+
+            page.browser().on('targetcreated', async (target) => {
+                if (target.type() === 'page') {
+                    const newPage = await target.page();
+                    if (newPage) {
+                        newPage.on('response', async (response) => {
+                            const url = response.url();
+                            if (url.includes('expires') && !downloadUrl) {
+                                downloadUrl = url;
+                                console.log('✅ Download link found, closing browser...');
+                                clearTimeout(timeout);
+                                
+                                try {
+                                    const browser = page.browser();
+                                    await browser.close();
+                                    console.log('✅ Browser closed successfully');
+                                } catch (err) {
+                                    console.error('⚠️ Error closing browser:', err.message);
+                                }
+                                
+                                resolve(downloadUrl);
+                            }
+                        });
+                    }
                 }
-            }
+            });
         });
-
-        // // Wait until we find a URL with 'expires' or timeout after 60 seconds
-        console.log('Waiting for download URL...');
-        let attempts = 0;
-        while (!downloadUrl && attempts < 60) {
-            await new Promise(resolve => setTimeout(resolve, 1000));
-            attempts++;
-        }
-        data.download_url = downloadUrl;
-        final_data = data;
     } catch (error) {
-        console.error('Error:', error);
-    } finally {
-        await browser.close();    
+        console.error(`❌ Error getting download link: ${error.message}`);
+        return null;
     }
-
-    return final_data;
 }
 
-// getDownloadLink('https://getintopc.com/softwares/backup-tool/ashampoo-backup-pro-2025-free-download/')
-//     .then(data => {
-//         console.log('\nCompleted scraping. Found links:');
-//         console.log(data);
-//     })
-//     .catch(error => {
-//         console.error('Script failed:', error);
-//     });
-
-async function getAllDownloadLinks() {
-const browser = await puppeteer.launch({
-    headless: false,
-    args: [
-        '--no-sandbox',
-        '--disable-setuid-sandbox',
-        '--disable-extensions', // Disable extensions
-        '--disable-popup-blocking' // Disable popup blocking
-    ],
-    // defaultViewport: null,
-    // executablePath: executablePath(),
-});
-
-    let allLinks = [];
-    const dataWithDownloadLink = null;
-    try {
+async function getPageArticles(numPages = 1) {
+    console.log(`📑 Getting articles from ${numPages} pages...`);
+    const allArticles = [];
+    
+    for (let pageNum = 1; pageNum <= numPages; pageNum++) {
+        const browser = await initBrowser();
         const page = await browser.newPage();
-        const allLinks = [];
-        // Go to main page
-        for (let index = 0; index < 50; index++) {
+        
+        try {
+            await page.goto(`https://getintopc.com/page/${pageNum}/?0`, {
+                waitUntil: 'networkidle2',
+                timeout: 60000
+            });
+
+            await page.waitForSelector('h2.title');
+
+            const articles = await page.evaluate(() => {
+                const articleNodes = document.querySelectorAll('.post');
+                return Array.from(articleNodes).map(article => {
+                    const titleLink = article.querySelector('h2.title a');
+                    const categoryLinks = Array.from(article.querySelectorAll('.post-info a'));
+                    
+                    return {
+                        title: titleLink?.textContent.trim(),
+                        url: titleLink?.href,
+                        categories: categoryLinks.map(a => a.textContent.trim())
+                    };
+                });
+            });
+
+            allArticles.push(...articles.filter(article => article.title && article.url));
+            console.log(`📊 Found ${articles.length} articles on page ${pageNum}`);
+        } catch (error) {
+            console.error(`❌ Error scraping page ${pageNum}: ${error.message}`);
+        } finally {
+            await page.close();
+        }
+    }
+    
+    return allArticles;
+}
+
+async function scrapeWebsite(numPages = 1) {
+    console.log(`🚀 Starting scraper - processing ${numPages} pages...`);
+    const results = [];
+
+    try {
+        const articles = await getPageArticles(numPages);
+        console.log(`📊 Total articles found: ${articles.length}`);
+
+        for (const article of articles) {
+            console.log(`\n🔄 Processing article: ${article.title}`);
+            
+            const browser = await initBrowser();
             try {
-                await page.goto(`https://getintopc.com/page/${index}/?0`, { 
-                    waitUntil: 'networkidle2', 
-                    timeout: 60000 
+                const { page, data: articleData } = await scrapeArticleData(browser, article.url);
+                if (!articleData || !page) continue;
+
+                const suppImage = await getSupplementaryImage(
+                    browser,
+                    articleData.details.standardized.software_name || article.title
+                );
+                
+                const downloadUrl = await getDownloadLink(page);
+
+                results.push({
+                    ...article,
+                    data: {
+                        ...articleData,
+                        image_supp: suppImage,
+                        download_url: downloadUrl
+                    }
                 });
 
-                // Get all article links
-                await page.waitForSelector('h2.title');
-                const links = await page.$$eval('h2.title a', 
-                    elements => elements.map(el => ({
-                        title: el.textContent.trim(),
-                        url: el.href
-                    }))
-                );
-
-                const categories = await page.$$eval('.post-info a', 
-                    elements => elements.map(el => el.textContent.trim())
-                );
-                links.categories = categories;
-                allLinks.push(...links); // Use spread operator to flatten the array
-
-                const linksToProcess = allLinks.slice(0, 2);
-
-                // Process each link
-                linksToProcess.forEach(async (link) => {
-                    console.log(`\nProcessing: ${link.title}`);
-                    const readyData = await getDownloadLink(link.url, browser);
-                    
-                    if (readyData) {
-                        dataWithDownloadLink.push({
-                            title: link.title,
-                            url: link.url,
-                            categories: link.categories,
-                            data: readyData
-                        });
-                        console.log(`✅ Successfully got data URL for: ${link.title}`);
-                    } else {
-                        console.log(`❌ Failed to get data URL for: ${link.title}`);
-                    }
-        
-                    // Wait between articles
-                    await new Promise(resolve => setTimeout(resolve, 2000));
-                })
+                console.log(`✅ Successfully processed: ${article.title}`);
+                
+                // Brief pause between articles
+                await new Promise(resolve => setTimeout(resolve, 2000));
             } catch (error) {
-                console.error(`Error on page ${index}:`, error);
+                console.error(`❌ Error processing article ${article.title}:`, error.message);
+            }
+            
+            // If browser wasn't closed by download process, close it
+            try {
+                const pages = await browser.pages();
+                if (pages.length > 0) {
+                    await browser.close();
+                }
+            } catch (error) {
+                // Browser was already closed, ignore error
             }
         }
-        console.log(allLinks);
-        console.log(dataWithDownloadLink);
 
-        return dataWithDownloadLink;
-
-        // console.log(`Found ${links.length} articles to process`);
-        
-        // Process first 5 links
-        // const linksToProcess = links.slice(0, 5);
-
-        // // Process each link
-        // for (const link of linksToProcess) {
-        //     console.log(`\nProcessing: ${link.title}`);
-        //     const downloadUrl = await getDownloadLink(link.url);
-            
-        //     if (downloadUrl) {
-        //         downloadLinks.push({
-        //             title: link.title,
-        //             downloadUrl: downloadUrl
-        //         });
-        //         console.log(`✅ Successfully got download URL for: ${link.title}`);
-        //     } else {
-        //         console.log(`❌ Failed to get download URL for: ${link.title}`);
-        //     }
-
-        //     // Wait between articles
-        //     await new Promise(resolve => setTimeout(resolve, 5000));
-        // }
-
-        // Save to file
-        // fs.writeFileSync('download_links.json', JSON.stringify(allLinks, null, 2));
-        // console.log('\nSaved all download links to download_links.json');
+        // Save results to file
+        const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+        const filename = `scraping_results_${timestamp}.json`;
+        fs.writeFileSync(filename, JSON.stringify(results, null, 2));
+        console.log(`\n💾 Results saved to ${filename}`);
 
     } catch (error) {
-        console.error('Error during scraping:', error);
-    } finally {
-        await browser.close();
+        console.error('❌ Scraping error:', error);
     }
 
-    return allLinks;
+    return results;
 }
 
-// Run the scraper
-const globalData = [];
-getAllDownloadLinks()
-    .then(links => {
-        console.log('\nCompleted scraping. Found data:');
-        links.forEach(link => {
-            globalData.push(link);
-        });
-    })
-    .catch(error => {
-        console.error('Script failed:', error);
-    });
+// Execute the scraper
+scrapeWebsite(1)
+    .then(results => console.log(`\n📈 Total articles processed: ${results.length}`))
+    .catch(error => console.error('🚫 Script failed:', error));
