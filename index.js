@@ -233,6 +233,8 @@ async function scrapeWebsite(numPages = 1) {
 
                 console.log(`✅ Successfully processed: ${article.title}`);
                 
+                console.log(`📊 Progress: ${results.length} / ${articles.length}`);
+
                 // Brief pause between articles
                 await new Promise(resolve => setTimeout(resolve, 2000));
             } catch (error) {
