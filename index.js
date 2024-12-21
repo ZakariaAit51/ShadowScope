@@ -2,15 +2,81 @@ import puppeteer from "puppeteer-extra";
 import StealthPlugin from "puppeteer-extra-plugin-stealth";
 import fs from 'fs';
 
-// Initialize puppeteer with stealth plugin
 puppeteer.use(StealthPlugin());
 
 async function initBrowser() {
     return await puppeteer.launch({
-        headless: true,
+        headless: false,
         args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-extensions', '--disable-popup-blocking']
     });
 }
+
+// Function to handle JSON file operations
+const JsonHandler = {
+    filename: `scraping_results_${new Date().toISOString().replace(/[:.]/g, '-')}.json`,
+
+    initialize() {
+        // Create empty JSON array
+        fs.writeFileSync(this.filename, '[]');
+        console.log(`📝 Initialized JSON file: ${this.filename}`);
+    },
+
+    appendArticle(article) {
+        try {
+            // Read current content
+            const content = JSON.parse(fs.readFileSync(this.filename, 'utf8'));
+            // Append new article
+            content.push(article);
+            // Write back to file
+            fs.writeFileSync(this.filename, JSON.stringify(content, null, 2));
+            console.log(`💾 Saved article: ${article.title}`);
+        } catch (error) {
+            console.error('❌ Error saving to JSON:', error.message);
+        }
+    },
+
+    appendLinks(links, pageNum) {
+        try {
+            // Read current content
+            const content = JSON.parse(fs.readFileSync(this.filename, 'utf8'));
+            // Add page number to each link
+            const linksWithPage = links.map(link => ({
+                ...link,
+                pageNum,
+                processed: false
+            }));
+            // Append new links
+            content.push(...linksWithPage);
+            // Write back to file
+            fs.writeFileSync(this.filename, JSON.stringify(content, null, 2));
+            console.log(`💾 Saved ${links.length} links from page ${pageNum}`);
+        } catch (error) {
+            console.error('❌ Error saving links to JSON:', error.message);
+        }
+    },
+
+    markAsProcessed(index) {
+        try {
+            const content = JSON.parse(fs.readFileSync(this.filename, 'utf8'));
+            if (content[index]) {
+                content[index].processed = true;
+                fs.writeFileSync(this.filename, JSON.stringify(content, null, 2));
+            }
+        } catch (error) {
+            console.error('❌ Error marking as processed:', error.message);
+        }
+    },
+
+    getUnprocessedLinks() {
+        try {
+            const content = JSON.parse(fs.readFileSync(this.filename, 'utf8'));
+            return content.filter(item => !item.processed);
+        } catch (error) {
+            console.error('❌ Error reading unprocessed links:', error.message);
+            return [];
+        }
+    }
+};
 
 async function scrapeArticleData(browser, url) {
     console.log(`📄 Scraping article data from: ${url}`);
@@ -157,115 +223,113 @@ async function getDownloadLink(page) {
     }
 }
 
-async function getPageArticles(numPages = 1) {
-    console.log(`📑 Getting articles from ${numPages} pages...`);
-    const allArticles = [];
+async function scrapePageLinks(pageNum) {
+    console.log(`📑 Scraping links from page ${pageNum}...`);
     
-    for (let pageNum = 1; pageNum <= numPages; pageNum++) {
-        const browser = await initBrowser();
-        const page = await browser.newPage();
+    const browser = await initBrowser();
+    const page = await browser.newPage();
+    
+    try {
+        await page.goto(`https://getintopc.com/page/${pageNum}/?0`, {
+            waitUntil: 'networkidle2',
+            timeout: 60000
+        });
+
+        await page.waitForSelector('h2.title');
+
+        const links = await page.evaluate(() => {
+            const articleNodes = document.querySelectorAll('.post');
+            return Array.from(articleNodes).map(article => {
+                const titleLink = article.querySelector('h2.title a');
+                const categoryLinks = Array.from(article.querySelectorAll('.post-info a'));
+                
+                return {
+                    title: titleLink?.textContent.trim(),
+                    url: titleLink?.href,
+                    categories: categoryLinks.map(a => a.textContent.trim())
+                };
+            });
+        });
+
+        return links.filter(link => link.title && link.url);
+    } catch (error) {
+        console.error(`❌ Error scraping page ${pageNum}:`, error.message);
+        return [];
+    } finally {
+        await browser.close();
+    }
+}
+
+async function processArticle(article, index) {
+    console.log(`\n🔄 Processing article: ${article.title}`);
+    
+    const browser = await initBrowser();
+    try {
+        const { page, data: articleData } = await scrapeArticleData(browser, article.url);
+        if (!articleData || !page) return;
+
+        const suppImage = await getSupplementaryImage(
+            browser,
+            articleData.details.standardized.software_name || article.title
+        );
         
-        try {
-            await page.goto(`https://getintopc.com/page/${pageNum}/?0`, {
-                waitUntil: 'networkidle2',
-                timeout: 60000
-            });
+        const downloadUrl = await getDownloadLink(page);
 
-            await page.waitForSelector('h2.title');
+        const processedArticle = {
+            ...article,
+            data: {
+                ...articleData,
+                image_supp: suppImage,
+                download_url: downloadUrl
+            }
+        };
 
-            const articles = await page.evaluate(() => {
-                const articleNodes = document.querySelectorAll('.post');
-                return Array.from(articleNodes).map(article => {
-                    const titleLink = article.querySelector('h2.title a');
-                    const categoryLinks = Array.from(article.querySelectorAll('.post-info a'));
-                    
-                    return {
-                        title: titleLink?.textContent.trim(),
-                        url: titleLink?.href,
-                        categories: categoryLinks.map(a => a.textContent.trim())
-                    };
-                });
-            });
+        JsonHandler.appendArticle(processedArticle);
+        JsonHandler.markAsProcessed(index);
 
-            allArticles.push(...articles.filter(article => article.title && article.url));
-            console.log(`📊 Found ${articles.length} articles on page ${pageNum}`);
-        } catch (error) {
-            console.error(`❌ Error scraping page ${pageNum}: ${error.message}`);
-        } finally {
-            await page.close();
-        }
+        console.log(`✅ Successfully processed: ${article.title}`);
+
+        // Brief pause between articles
+        await new Promise(resolve => setTimeout(resolve, 2000));
+    } catch (error) {
+        console.error(`❌ Error processing article ${article.title}:`, error.message);
     }
     
-    return allArticles;
+    // If browser wasn't closed by download process, close it
+    try {
+        const pages = await browser.pages();
+        if (pages.length > 0) {
+            await browser.close();
+        }
+    } catch (error) {
+        // Browser was already closed, ignore error
+    }
 }
 
 async function scrapeWebsite(numPages = 1) {
     console.log(`🚀 Starting scraper - processing ${numPages} pages...`);
-    const results = [];
+    
+    // Initialize JSON file
+    JsonHandler.initialize();
 
-    try {
-        const articles = await getPageArticles(numPages);
-        console.log(`📊 Total articles found: ${articles.length}`);
-
-        for (const article of articles) {
-            console.log(`\n🔄 Processing article: ${article.title}`);
-            
-            const browser = await initBrowser();
-            try {
-                const { page, data: articleData } = await scrapeArticleData(browser, article.url);
-                if (!articleData || !page) continue;
-
-                const suppImage = await getSupplementaryImage(
-                    browser,
-                    articleData.details.standardized.software_name || article.title
-                );
-                
-                const downloadUrl = await getDownloadLink(page);
-
-                results.push({
-                    ...article,
-                    data: {
-                        ...articleData,
-                        image_supp: suppImage,
-                        download_url: downloadUrl
-                    }
-                });
-
-                console.log(`✅ Successfully processed: ${article.title}`);
-                
-                console.log(`📊 Progress: ${results.length} / ${articles.length}`);
-
-                // Brief pause between articles
-                await new Promise(resolve => setTimeout(resolve, 2000));
-            } catch (error) {
-                console.error(`❌ Error processing article ${article.title}:`, error.message);
-            }
-            
-            // If browser wasn't closed by download process, close it
-            try {
-                const pages = await browser.pages();
-                if (pages.length > 0) {
-                    await browser.close();
-                }
-            } catch (error) {
-                // Browser was already closed, ignore error
-            }
-        }
-
-        // Save results to file
-        const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
-        const filename = `scraping_results_${timestamp}.json`;
-        fs.writeFileSync(filename, JSON.stringify(results, null, 2));
-        console.log(`\n💾 Results saved to ${filename}`);
-
-    } catch (error) {
-        console.error('❌ Scraping error:', error);
+    // First phase: Gather all links
+    for (let pageNum = 1; pageNum <= numPages; pageNum++) {
+        const links = await scrapePageLinks(pageNum);
+        JsonHandler.appendLinks(links, pageNum);
+        await new Promise(resolve => setTimeout(resolve, 1000));
     }
 
-    return results;
+    // Second phase: Process each link
+    const unprocessedLinks = JsonHandler.getUnprocessedLinks();
+    console.log(`📊 Total articles to process: ${unprocessedLinks.length}`);
+
+    for (let i = 0; i < unprocessedLinks.length; i++) {
+        await processArticle(unprocessedLinks[i], i);
+    }
+
+    console.log('\n👋 Scraping completed!');
 }
 
 // Execute the scraper
 scrapeWebsite(1)
-    .then(results => console.log(`\n📈 Total articles processed: ${results.length}`))
     .catch(error => console.error('🚫 Script failed:', error));
