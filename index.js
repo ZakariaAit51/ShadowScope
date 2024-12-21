@@ -6,29 +6,39 @@ puppeteer.use(StealthPlugin());
 
 async function initBrowser() {
     return await puppeteer.launch({
-        headless: false,
-        args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-extensions', '--disable-popup-blocking']
+        headless: true,
+        args: [
+            '--no-sandbox',
+            '--disable-setuid-sandbox',
+            '--disable-extensions',
+            '--disable-popup-blocking',
+            '--disable-dev-shm-usage',
+            '--disable-accelerated-2d-canvas',
+            '--no-first-run',
+            '--no-zygote',
+            '--disable-gpu'
+        ]
     });
 }
 
 // Function to handle JSON file operations
 const JsonHandler = {
     filename: `scraping_results_${new Date().toISOString().replace(/[:.]/g, '-')}.json`,
+    totalArticles: 0,
+    processedArticles: 0,
 
     initialize() {
-        // Create empty JSON array
         fs.writeFileSync(this.filename, '[]');
         console.log(`📝 Initialized JSON file: ${this.filename}`);
     },
 
     appendArticle(article) {
         try {
-            // Read current content
             const content = JSON.parse(fs.readFileSync(this.filename, 'utf8'));
-            // Append new article
             content.push(article);
-            // Write back to file
             fs.writeFileSync(this.filename, JSON.stringify(content, null, 2));
+            this.processedArticles++;
+            this.showProgress();
             console.log(`💾 Saved article: ${article.title}`);
         } catch (error) {
             console.error('❌ Error saving to JSON:', error.message);
@@ -37,18 +47,15 @@ const JsonHandler = {
 
     appendLinks(links, pageNum) {
         try {
-            // Read current content
             const content = JSON.parse(fs.readFileSync(this.filename, 'utf8'));
-            // Add page number to each link
             const linksWithPage = links.map(link => ({
                 ...link,
                 pageNum,
                 processed: false
             }));
-            // Append new links
             content.push(...linksWithPage);
-            // Write back to file
             fs.writeFileSync(this.filename, JSON.stringify(content, null, 2));
+            this.totalArticles += links.length;
             console.log(`💾 Saved ${links.length} links from page ${pageNum}`);
         } catch (error) {
             console.error('❌ Error saving links to JSON:', error.message);
@@ -75,6 +82,12 @@ const JsonHandler = {
             console.error('❌ Error reading unprocessed links:', error.message);
             return [];
         }
+    },
+
+    showProgress() {
+        const percentage = ((this.processedArticles / this.totalArticles) * 100).toFixed(2);
+        const progressBar = '='.repeat(Math.floor(percentage / 2)) + '-'.repeat(50 - Math.floor(percentage / 2));
+        console.log(`\nProgress: [${progressBar}] ${this.processedArticles}/${this.totalArticles} (${percentage}%)\n`);
     }
 };
 
@@ -82,9 +95,29 @@ async function scrapeArticleData(browser, url) {
     console.log(`📄 Scraping article data from: ${url}`);
     
     const page = await browser.newPage();
+    await page.setRequestInterception(true);
+    
+    page.on('request', (request) => {
+        const resourceType = request.resourceType();
+        if (['image', 'stylesheet', 'font', 'media'].includes(resourceType)) {
+            request.abort();
+        } else {
+            request.continue();
+        }
+    });
+
     try {
-        await page.goto(url, { waitUntil: 'networkidle2', timeout: 60000 });
-        await page.waitForSelector('div.post-content');
+        await page.goto(url, { 
+            waitUntil: 'domcontentloaded',
+            timeout: 30000
+        });
+        
+        const contentPromise = page.waitForSelector('div.post-content');
+        const timeoutPromise = new Promise((_, reject) => 
+            setTimeout(() => reject(new Error('Selector timeout')), 10000)
+        );
+        
+        await Promise.race([contentPromise, timeoutPromise]);
 
         const data = await page.evaluate(() => {
             const postContent = document.querySelector(".post-content.clear-block");
@@ -150,11 +183,22 @@ async function getSupplementaryImage(browser, softwareName) {
     console.log(`🔍 Searching for supplementary image for: ${softwareName}`);
     
     const searchPage = await browser.newPage();
+    await searchPage.setRequestInterception(true);
+    
+    searchPage.on('request', (request) => {
+        const resourceType = request.resourceType();
+        if (['stylesheet', 'font', 'media'].includes(resourceType)) {
+            request.abort();
+        } else {
+            request.continue();
+        }
+    });
+
     try {
         const searchQuery = `${softwareName.toLowerCase().split(' ').slice(0, 2).join(' ')} programme Icon 16:3`;
         await searchPage.goto(
             `https://www.google.com/search?tbm=isch&q=${encodeURIComponent(searchQuery)}`,
-            { waitUntil: "domcontentloaded", timeout: 60000 }
+            { waitUntil: "domcontentloaded", timeout: 30000 }
         );
 
         await searchPage.waitForSelector("img");
@@ -184,11 +228,16 @@ async function getDownloadLink(page) {
     console.log('🔗 Getting download link...');
     
     try {
-        await page.waitForSelector('button.btn');
+        const buttonPromise = page.waitForSelector('button.btn');
+        const timeoutPromise = new Promise((_, reject) => 
+            setTimeout(() => reject(new Error('Button timeout')), 15000)
+        );
+        
+        await Promise.race([buttonPromise, timeoutPromise]);
         await page.click('button.btn');
 
         return new Promise((resolve) => {
-            const timeout = setTimeout(() => resolve(null), 60000);
+            const timeout = setTimeout(() => resolve(null), 30000);
             let downloadUrl = null;
 
             page.browser().on('targetcreated', async (target) => {
@@ -231,8 +280,8 @@ async function scrapePageLinks(pageNum) {
     
     try {
         await page.goto(`https://getintopc.com/page/${pageNum}/?0`, {
-            waitUntil: 'networkidle2',
-            timeout: 60000
+            waitUntil: 'domcontentloaded',
+            timeout: 30000
         });
 
         await page.waitForSelector('h2.title');
@@ -268,12 +317,13 @@ async function processArticle(article, index) {
         const { page, data: articleData } = await scrapeArticleData(browser, article.url);
         if (!articleData || !page) return;
 
-        const suppImage = await getSupplementaryImage(
-            browser,
-            articleData.details.standardized.software_name || article.title
-        );
-        
-        const downloadUrl = await getDownloadLink(page);
+        const [suppImage, downloadUrl] = await Promise.all([
+            getSupplementaryImage(
+                browser,
+                articleData.details.standardized.software_name || article.title
+            ),
+            getDownloadLink(page)
+        ]);
 
         const processedArticle = {
             ...article,
@@ -289,13 +339,11 @@ async function processArticle(article, index) {
 
         console.log(`✅ Successfully processed: ${article.title}`);
 
-        // Brief pause between articles
-        await new Promise(resolve => setTimeout(resolve, 2000));
+        await new Promise(resolve => setTimeout(resolve, 1000));
     } catch (error) {
         console.error(`❌ Error processing article ${article.title}:`, error.message);
     }
     
-    // If browser wasn't closed by download process, close it
     try {
         const pages = await browser.pages();
         if (pages.length > 0) {
@@ -309,17 +357,14 @@ async function processArticle(article, index) {
 async function scrapeWebsite(numPages = 1) {
     console.log(`🚀 Starting scraper - processing ${numPages} pages...`);
     
-    // Initialize JSON file
     JsonHandler.initialize();
 
-    // First phase: Gather all links
     for (let pageNum = 1; pageNum <= numPages; pageNum++) {
         const links = await scrapePageLinks(pageNum);
         JsonHandler.appendLinks(links, pageNum);
         await new Promise(resolve => setTimeout(resolve, 1000));
     }
 
-    // Second phase: Process each link
     const unprocessedLinks = JsonHandler.getUnprocessedLinks();
     console.log(`📊 Total articles to process: ${unprocessedLinks.length}`);
 
