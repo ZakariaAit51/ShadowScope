@@ -4,6 +4,111 @@ import fs from 'fs';
 
 puppeteer.use(StealthPlugin());
 
+// Improved JsonHandler with batch processing
+const JsonHandler = {
+    linksFile: `links_${new Date().toISOString().replace(/[:.]/g, '-')}.json`,
+    dataFilePrefix: 'data_batch_',
+    batchSize: 100,
+    totalArticles: 0,
+    processedArticles: 0,
+    currentBatch: 0,
+
+    initialize() {
+        fs.writeFileSync(this.linksFile, '[]');
+        this._createNewBatch();
+        console.log(`📝 Initialized files system`);
+    },
+
+    _createNewBatch() {
+        this.currentBatch = Math.floor(this.processedArticles / this.batchSize);
+        const filename = `${this.dataFilePrefix}${this.currentBatch}.json`;
+        if (!fs.existsSync(filename)) {
+            fs.writeFileSync(filename, '[]');
+            console.log(`📝 Created new batch file: ${filename}`);
+        }
+    },
+
+    _getCurrentBatchFile() {
+        return `${this.dataFilePrefix}${this.currentBatch}.json`;
+    },
+
+    appendArticle(article) {
+        try {
+            const batchFile = this._getCurrentBatchFile();
+            const content = JSON.parse(fs.readFileSync(batchFile, 'utf8'));
+            content.push(article);
+            fs.writeFileSync(batchFile, JSON.stringify(content, null, 2));
+            
+            this.processedArticles++;
+            
+            if (this.processedArticles % this.batchSize === 0) {
+                this._createNewBatch();
+            }
+            
+            this.showProgress();
+            console.log(`💾 Saved article: ${article.title} to ${batchFile}`);
+        } catch (error) {
+            console.error('❌ Error saving to JSON:', error.message);
+        }
+    },
+
+    appendLinks(links, pageNum) {
+        try {
+            const content = JSON.parse(fs.readFileSync(this.linksFile, 'utf8'));
+            const linksWithPage = links.map(link => ({
+                ...link,
+                pageNum,
+                processed: false
+            }));
+            content.push(...linksWithPage);
+            fs.writeFileSync(this.linksFile, JSON.stringify(content, null, 2));
+            this.totalArticles += links.length;
+            console.log(`💾 Saved ${links.length} links from page ${pageNum}`);
+        } catch (error) {
+            console.error('❌ Error saving links to JSON:', error.message);
+        }
+    },
+
+    markAsProcessed(url) {
+        try {
+            const content = JSON.parse(fs.readFileSync(this.linksFile, 'utf8'));
+            const linkIndex = content.findIndex(item => item.url === url);
+            if (linkIndex !== -1) {
+                content[linkIndex].processed = true;
+                fs.writeFileSync(this.linksFile, JSON.stringify(content, null, 2));
+            }
+        } catch (error) {
+            console.error('❌ Error marking as processed:', error.message);
+        }
+    },
+
+    getUnprocessedLinks() {
+        try {
+            const content = JSON.parse(fs.readFileSync(this.linksFile, 'utf8'));
+            return content.filter(item => !item.processed);
+        } catch (error) {
+            console.error('❌ Error reading unprocessed links:', error.message);
+            return [];
+        }
+    },
+
+    showProgress() {
+        const percentage = ((this.processedArticles / this.totalArticles) * 100).toFixed(2);
+        const progressBar = '='.repeat(Math.floor(percentage / 2)) + '-'.repeat(50 - Math.floor(percentage / 2));
+        console.log(`\nProgress: [${progressBar}] ${this.processedArticles}/${this.totalArticles} (${percentage}%)`);
+        console.log(`Current batch: ${this.currentBatch}, File: ${this._getCurrentBatchFile()}\n`);
+    }
+};
+
+// Browser management functions
+function logMemoryUsage() {
+    const used = process.memoryUsage();
+    console.log('Memory usage:');
+    for (let key in used) {
+        console.log(`${key}: ${Math.round(used[key] / 1024 / 1024 * 100) / 100} MB`);
+    }
+}
+
 async function initBrowser() {
     return await puppeteer.launch({
         headless: true,
@@ -16,105 +121,43 @@ async function initBrowser() {
             '--disable-accelerated-2d-canvas',
             '--no-first-run',
             '--no-zygote',
-            '--disable-gpu'
+            '--disable-gpu',
+            '--memory-pressure-off',
+            '--js-flags="--max-old-space-size=2048"', // Reduced for t3.micro
+            '--disable-web-security',
+            '--disable-features=IsolateOrigins,site-per-process'
         ]
     });
 }
 
-// Function to handle JSON file operations
-const JsonHandler = {
-    filename: `scraping_results_${new Date().toISOString().replace(/[:.]/g, '-')}.json`,
-    totalArticles: 0,
-    processedArticles: 0,
-
-    initialize() {
-        fs.writeFileSync(this.filename, '[]');
-        console.log(`📝 Initialized JSON file: ${this.filename}`);
-    },
-
-    appendArticle(article) {
-        try {
-            const content = JSON.parse(fs.readFileSync(this.filename, 'utf8'));
-            content.push(article);
-            fs.writeFileSync(this.filename, JSON.stringify(content, null, 2));
-            this.processedArticles++;
-            this.showProgress();
-            console.log(`💾 Saved article: ${article.title}`);
-        } catch (error) {
-            console.error('❌ Error saving to JSON:', error.message);
-        }
-    },
-
-    appendLinks(links, pageNum) {
-        try {
-            const content = JSON.parse(fs.readFileSync(this.filename, 'utf8'));
-            const linksWithPage = links.map(link => ({
-                ...link,
-                pageNum,
-                processed: false
-            }));
-            content.push(...linksWithPage);
-            fs.writeFileSync(this.filename, JSON.stringify(content, null, 2));
-            this.totalArticles += links.length;
-            console.log(`💾 Saved ${links.length} links from page ${pageNum}`);
-        } catch (error) {
-            console.error('❌ Error saving links to JSON:', error.message);
-        }
-    },
-
-    markAsProcessed(index) {
-        try {
-            const content = JSON.parse(fs.readFileSync(this.filename, 'utf8'));
-            if (content[index]) {
-                content[index].processed = true;
-                fs.writeFileSync(this.filename, JSON.stringify(content, null, 2));
-            }
-        } catch (error) {
-            console.error('❌ Error marking as processed:', error.message);
-        }
-    },
-
-    getUnprocessedLinks() {
-        try {
-            const content = JSON.parse(fs.readFileSync(this.filename, 'utf8'));
-            return content.filter(item => !item.processed);
-        } catch (error) {
-            console.error('❌ Error reading unprocessed links:', error.message);
-            return [];
-        }
-    },
-
-    showProgress() {
-        const percentage = ((this.processedArticles / this.totalArticles) * 100).toFixed(2);
-        const progressBar = '='.repeat(Math.floor(percentage / 2)) + '-'.repeat(50 - Math.floor(percentage / 2));
-        console.log(`\nProgress: [${progressBar}] ${this.processedArticles}/${this.totalArticles} (${percentage}%)\n`);
-    }
-};
-
 async function scrapeArticleData(browser, url) {
     console.log(`📄 Scraping article data from: ${url}`);
+    let page = null;
     
-    const page = await browser.newPage();
-    await page.setRequestInterception(true);
-    
-    page.on('request', (request) => {
-        const resourceType = request.resourceType();
-        if (['image', 'stylesheet', 'font', 'media'].includes(resourceType)) {
-            request.abort();
-        } else {
-            request.continue();
-        }
-    });
-
     try {
+        page = await browser.newPage();
+        await page.setDefaultNavigationTimeout(45000);
+        
+        await page.setRequestInterception(true);
+        page.on('request', (request) => {
+            if (['image', 'stylesheet', 'font', 'media', 'script'].includes(request.resourceType())) {
+                request.abort();
+            } else {
+                request.continue();
+            }
+        });
+
+        const client = await page.target().createCDPSession();
+        await client.send('Network.clearBrowserCache');
+        
         await page.goto(url, { 
             waitUntil: 'domcontentloaded',
-            timeout: 30000
+            timeout: 45000
         });
         
         const contentPromise = page.waitForSelector('div.post-content');
         const timeoutPromise = new Promise((_, reject) => 
-            setTimeout(() => reject(new Error('Selector timeout')), 10000)
+            setTimeout(() => reject(new Error('Selector timeout')), 15000)
         );
         
         await Promise.race([contentPromise, timeoutPromise]);
@@ -174,7 +217,7 @@ async function scrapeArticleData(browser, url) {
         return { page, data };
     } catch (error) {
         console.error(`❌ Error scraping article data: ${error.message}`);
-        await page.close();
+        if (page) await page.close();
         return { page: null, data: null };
     }
 }
@@ -186,8 +229,7 @@ async function getSupplementaryImage(browser, softwareName) {
     await searchPage.setRequestInterception(true);
     
     searchPage.on('request', (request) => {
-        const resourceType = request.resourceType();
-        if (['stylesheet', 'font', 'media'].includes(resourceType)) {
+        if (['stylesheet', 'font', 'media'].includes(request.resourceType())) {
             request.abort();
         } else {
             request.continue();
@@ -248,17 +290,8 @@ async function getDownloadLink(page) {
                             const url = response.url();
                             if (url.includes('expires') && !downloadUrl) {
                                 downloadUrl = url;
-                                console.log('✅ Download link found, closing browser...');
+                                console.log('✅ Download link found');
                                 clearTimeout(timeout);
-                                
-                                try {
-                                    const browser = page.browser();
-                                    await browser.close();
-                                    console.log('✅ Browser closed successfully');
-                                } catch (err) {
-                                    console.error('⚠️ Error closing browser:', err.message);
-                                }
-                                
                                 resolve(downloadUrl);
                             }
                         });
@@ -272,10 +305,9 @@ async function getDownloadLink(page) {
     }
 }
 
-async function scrapePageLinks(pageNum) {
+async function scrapePageLinks(pageNum, browser) {
     console.log(`📑 Scraping links from page ${pageNum}...`);
     
-    const browser = await initBrowser();
     const page = await browser.newPage();
     
     try {
@@ -305,11 +337,11 @@ async function scrapePageLinks(pageNum) {
         console.error(`❌ Error scraping page ${pageNum}:`, error.message);
         return [];
     } finally {
-        await browser.close();
+        await page.close();
     }
 }
 
-async function processArticle(article, index) {
+async function processArticle(article) {
     console.log(`\n🔄 Processing article: ${article.title}`);
     
     const browser = await initBrowser();
@@ -335,22 +367,19 @@ async function processArticle(article, index) {
         };
 
         JsonHandler.appendArticle(processedArticle);
-        JsonHandler.markAsProcessed(index);
+        JsonHandler.markAsProcessed(article.url);
 
         console.log(`✅ Successfully processed: ${article.title}`);
 
-        await new Promise(resolve => setTimeout(resolve, 1000));
+        await new Promise(resolve => setTimeout(resolve, 2000));
     } catch (error) {
         console.error(`❌ Error processing article ${article.title}:`, error.message);
-    }
-    
-    try {
-        const pages = await browser.pages();
-        if (pages.length > 0) {
+    } finally {
+        try {
             await browser.close();
+        } catch (error) {
+            // Browser might already be closed
         }
-    } catch (error) {
-        // Browser was already closed, ignore error
     }
 }
 
@@ -358,23 +387,79 @@ async function scrapeWebsite(numPages = 1) {
     console.log(`🚀 Starting scraper - processing ${numPages} pages...`);
     
     JsonHandler.initialize();
+    let browser = null;
+    let pageCount = 0;
+    const RESTART_BROWSER_AFTER = 10; // Reduced for t3.micro
+    
+    try {
+        // First phase: Collect all links
+        console.log('Phase 1: Collecting links...');
+        for (let pageNum = 1; pageNum <= numPages; pageNum++) {
+            if (pageCount >= RESTART_BROWSER_AFTER || !browser) {
+                if (browser) {
+                    await browser.close();
+                    await new Promise(resolve => setTimeout(resolve, 5000));
+                }
+                browser = await initBrowser();
+                pageCount = 0;
+                logMemoryUsage();
+            }
+            
+            const links = await scrapePageLinks(pageNum, browser);
+            JsonHandler.appendLinks(links, pageNum);
+            
+            pageCount++;
+            await new Promise(resolve => setTimeout(resolve, 2000));
+        }
 
-    for (let pageNum = 1; pageNum <= numPages; pageNum++) {
-        const links = await scrapePageLinks(pageNum);
-        JsonHandler.appendLinks(links, pageNum);
-        await new Promise(resolve => setTimeout(resolve, 1000));
+        if (browser) await browser.close();
+        
+        // Second phase: Process articles
+        console.log('\nPhase 2: Processing articles...');
+        const unprocessedLinks = JsonHandler.getUnprocessedLinks();
+        console.log(`Found ${unprocessedLinks.length} articles to process`);
+
+        // Process articles in smaller batches
+        const BATCH_SIZE = 5; // Process 5 articles at a time
+        for (let i = 0; i < unprocessedLinks.length; i += BATCH_SIZE) {
+            const batch = unprocessedLinks.slice(i, i + BATCH_SIZE);
+            for (const article of batch) {
+                await processArticle(article);
+            }
+            logMemoryUsage();
+            await new Promise(resolve => setTimeout(resolve, 5000)); // Cool-down between batches
+        }
+
+        } catch (error) {
+        console.error('🚫 Script failed:', error);
+        } finally {
+        if (browser) {
+            await browser.close();
+        }
+        }
+
+        console.log('\n👋 Scraping completed!');
+        }
+
+        // Error recovery
+        process.on('unhandledRejection', (error) => {
+        console.error('Unhandled rejection:', error);
+        });
+
+        // Execute the scraper with automatic retries
+        async function executeWithRetries(maxRetries = 3) {
+        for (let attempt = 1; attempt <= maxRetries; attempt++) {
+        try {
+            await scrapeWebsite(5);
+            break;
+        } catch (error) {
+            console.error(`Attempt ${attempt} failed:`, error);
+            if (attempt < maxRetries) {
+                console.log(`Retrying in 30 seconds...`);
+                await new Promise(resolve => setTimeout(resolve, 30000));
+            }
+        }
     }
-
-    const unprocessedLinks = JsonHandler.getUnprocessedLinks();
-    console.log(`📊 Total articles to process: ${unprocessedLinks.length}`);
-
-    for (let i = 0; i < unprocessedLinks.length; i++) {
-        await processArticle(unprocessedLinks[i], i);
-    }
-
-    console.log('\n👋 Scraping completed!');
 }
 
-// Execute the scraper
-scrapeWebsite(1)
-    .catch(error => console.error('🚫 Script failed:', error));
+executeWithRetries();
